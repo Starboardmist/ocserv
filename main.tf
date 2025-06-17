@@ -31,7 +31,7 @@ resource "yandex_compute_instance" "vm-ubuntu" {
   }
 
   scheduling_policy {
-    preemptible = true
+    preemptible = false
   }
 
   boot_disk {

@@ -1,0 +1,116 @@
+---
+- name: Installation and configuration OpenConnect VPN (ocserv) on Ubuntu 24.04
+  hosts: vpn
+  become: yes
+  vars:
+    vpn_domain: "starboardmist1.duckdns.org"
+    vpn_email: "timur210469@gmail.com"
+    vpn_user: "vpnuser"
+    vpn_password: "StrongPassw0rd!"
+  tasks:
+    - name: APT update
+      apt:
+        update_cache: yes
+
+    - name: Installation ocserv, certbot and ufw
+      apt:
+        name:
+          - ocserv
+          - certbot
+          - ufw
+        state: present
+
+    - name: Allow SSH in firewall(port 22)
+      ufw:
+        rule: allow
+        port: "22"
+        proto: tcp
+
+    - name: Adding a Masquerading (NAT) Rule in UFW for a VPN Subnet
+      shell: "ip -4 route show default | awk '{print $5}'"
+      register: default_if
+      changed_when: false
+
+    - name: Copy the before.rules template to the server
+      template:
+        src: templates/before.rules.j2
+        dest: /etc/ufw/before.rules
+        owner: root
+        group: root
+        mode: '0644'
+      notify: Restart UFW
+
+    - name: Enabling UFW (firewall)
+      command: ufw --force enable
+
+    - name: Allow HTTP/HTTPS (port 80 and 443)
+      ufw:
+        rule: allow
+        port: "80,443"
+        proto: tcp
+
+    - name: Enable IP Forwarding
+      copy:
+        dest: /etc/sysctl.d/60-custom.conf
+        content: |
+          net.ipv4.ip_forward = 1
+          net.core.default_qdisc = fq
+          net.ipv4.tcp_congestion_control = bbr
+
+    - name: Save changes
+      command: sysctl -p /etc/sysctl.d/60-custom.conf
+
+    - name: Stop ocserv (to free up the port before issuing a certificate)
+      service:
+        name: ocserv
+        state: stopped
+      when: ocserv_status is defined and ocserv_status.status == "running"
+      register: ocserv_stopped
+    
+    - name: Checking the existence of a certificate Let's Encrypt
+      stat:
+        path: /etc/letsencrypt/live/{{ vpn_domain }}/fullchain.pem
+      register: cert_check
+
+    - name: Obtaining a certificate Let's Encrypt for {{ vpn_domain }}
+      command: >
+        certbot certonly --standalone --preferred-challenges http 
+        --agree-tos --email {{ vpn_email }} -d {{ vpn_domain }}
+      register: certbot_result
+      changed_when: "'Congratulations' in certbot_result.stdout"
+      when: not cert_check.stat.exists
+
+    - name: Run ocserv after receiving certificate
+      service:
+        name: ocserv
+        state: started
+      when: ocserv_stopped is defined and ocserv_stopped.changed
+
+    - name: Copying ocserv configuration template with variables
+      template:
+        src: templates/ocserv.conf.j2
+        dest: /etc/ocserv/ocserv.conf
+        owner: root
+        group: root
+        mode: '0644'
+      notify: Restart ocserv
+
+    - name: Adding VPN-user {{ vpn_user }}
+      vars:
+        ansible_python_interpreter: /usr/bin/python3
+      expect:
+        command: "ocpasswd -c /etc/ocserv/passwd {{ vpn_user }}"
+        responses:
+          "Enter password:": "{{ vpn_password }}\n"
+          "Re-enter password:": "{{ vpn_password }}\n"
+      no_log: true
+      when: vpn_user is defined and vpn_password is defined
+
+  handlers:
+    - name: Restart UFW
+      shell: systemctl restart ufw
+
+    - name: Restart ocserv
+      service:
+        name: ocserv
+        state: restarted
